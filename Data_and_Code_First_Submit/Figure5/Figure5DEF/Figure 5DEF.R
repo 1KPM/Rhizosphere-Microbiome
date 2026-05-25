@@ -1,0 +1,204 @@
+# 设置工作目录
+pwd <- dirname(rstudioapi::getSourceEditorContext()$path)
+setwd(pwd)
+
+# 加载必要的包
+library(igraph)
+library(tidyverse)
+library(ggraph)
+library(dplyr)
+set.seed(123)
+
+metadata <- read.csv("./data/metadata0425.csv")
+kegg_name <- read.csv("./data/K_gene_name.csv",row.names = 1)
+top10_orders <- c("Asparagales", "Arecales", "Fabales", "Rosales", "Lamiales",
+                  "Malpighiales", "Sapindales", "Gentianales", "Malvales", "Myrtales")
+
+lineage_colors <- c("1" = "#D53E4F", "2" = "#FFFFBF", "3" = "#3288BD")
+
+microbe_types <- c("Bacteria", "Fungi", "Protist")
+
+for (microbe_type in microbe_types) {
+  
+  ko_file <- paste0("./data/", microbe_type, "_KO_core0.5.txt")
+  signal_file <- paste0("./data/", microbe_type, "_KO_phylogenetic_signal_qa(log).csv")
+  
+  KO_table <- read.delim(ko_file, check.names = F, row.names = 1)
+  signal <- read.csv(signal_file)
+  
+  signal_KO <- signal %>% 
+    filter(P < 0.05) %>% 
+    select(KO)
+  
+  KO_table_long <- KO_table %>%
+    rownames_to_column(var = "KO") %>%
+    pivot_longer(
+      cols = -KO,
+      names_to = "TreeID",
+      values_to = "abundance",
+      values_drop_na = TRUE
+    ) %>%
+    filter(abundance > 0) %>% 
+    merge(., metadata %>% select(TreeID, Order), by = 'TreeID')
+  
+  KO_table_long_top_order <- KO_table_long %>%
+    filter(Order %in% top10_orders, abundance >= 1)
+  
+  KO_table_long_top_order_sum <- KO_table_long_top_order %>%
+    group_by(KO) %>%
+    summarise(
+      n_order = n_distinct(Order),
+      abundance_sum = sum(abundance),
+      .groups = "drop"
+    ) %>%
+    mutate(log_abundance_sum = log10(abundance_sum + 1))
+  
+  filtered_ko_ids <- KO_table_long_top_order_sum %>%
+    filter(n_order <= 3) %>%
+    pull(KO)
+  
+  KO_table_long_top_order_filtered <- KO_table_long_top_order %>%
+    filter(KO %in% filtered_ko_ids)
+  
+  KO_table_long_top_order_sum_filtered <- KO_table_long_top_order_sum %>%
+    filter(KO %in% filtered_ko_ids)
+  
+  edges <- KO_table_long_top_order_filtered %>%
+    select(KO, Order) %>%
+    distinct() %>%
+    dplyr::rename(from = KO, to = Order)
+  
+  nodes <- tibble(name = unique(c(edges$from, edges$to))) %>%
+    left_join(KO_table_long_top_order_sum_filtered, by = c("name" = "KO")) %>%
+    mutate(
+      node_type = ifelse(name %in% edges$to, "Plant_Order", "KO"),
+      Relative_abundance = log_abundance_sum,
+      number_of_host_lineages = n_order,
+      has_signal = ifelse(name %in% signal_KO$KO & node_type == "KO", TRUE, FALSE)
+    ) %>%
+    mutate(
+      number_of_host_lineages = as.character(number_of_host_lineages),
+      color_manual = ifelse(
+        node_type == "KO",
+        lineage_colors[number_of_host_lineages],
+        "black"
+      )
+    ) %>%
+    select(name, node_type, Relative_abundance, number_of_host_lineages, color_manual, has_signal)
+  nodes <- nodes %>% left_join(kegg_name, by = c("name" = "KO"))
+  nodes_edges <- nodes %>% left_join(edges, by = c("name" = "from"))
+  write.csv(edges, paste0("./result/", microbe_type, "_edge.csv"), row.names = F)
+  write.csv(nodes, paste0("./result/", microbe_type, "_node.csv"), row.names = F)
+  write.csv(nodes_edges, paste0("./result/", microbe_type, "_node_edges.csv"), row.names = F)
+  
+  net <- graph_from_data_frame(d = edges, vertices = nodes, directed = FALSE)
+  
+  p1 <- ggraph(net, layout = "fr") +
+    geom_edge_link(alpha = 1, color = "grey") +
+    geom_node_point(aes(
+      size = ifelse(node_type == "KO", Relative_abundance, 4),
+      shape = ifelse(node_type == "KO",
+                     ifelse(has_signal, "has_signal", "no_signal"),
+                     "plant")
+    ),
+    color = nodes$color_manual,
+    stroke = 0.8,
+    show.legend = TRUE) +
+    scale_size_continuous(
+      name = "Relative abundance(log)",
+      range = c(1, 6)
+    ) +
+    scale_shape_manual(
+      name = "Node type",
+      values = c("has_signal" = 16, "no_signal" = 1, "plant" = 1),
+      labels = c("has_signal" = "KO (have signal)", 
+                 "no_signal" = "KO (no signal)", 
+                 "plant" = "Plant Order")
+    ) +
+    theme_void() +
+    labs(title = microbe_type) +
+    theme(legend.position = "right") +
+    geom_node_text(
+      aes(label = ifelse(number_of_host_lineages == "1" & has_signal, gene, 
+                         ifelse(node_type == "Plant_Order", name, NA))),
+      repel = TRUE, size = 2
+    )
+  
+  width <- 15.5
+  height <- 10.5
+  ggsave(paste0(microbe_type, '-KO-Order-network_less3.png'), p1, width = width, height = height, dpi = 900, type = 'cairo', units = 'cm')
+  ggsave(paste0(microbe_type, '-KO-Order-network_less3.pdf'), p1, width = width, height = height, units = 'cm')
+  
+  p2 <- ggraph(net, layout = "fr") +
+    geom_edge_link(alpha = 1, color = "grey") +
+    geom_node_point(aes(
+      size = ifelse(node_type == "KO", Relative_abundance, 4),
+      shape = ifelse(node_type == "KO",
+                     ifelse(has_signal, "has_signal", "no_signal"),
+                     "plant")
+    ),
+    color = nodes$color_manual,
+    stroke = 0.8,
+    show.legend = TRUE) +
+    scale_size_continuous(
+      name = "Relative abundance(log)",
+      range = c(1, 6)
+    ) +
+    scale_shape_manual(
+      name = "Node type",
+      values = c("has_signal" = 16, "no_signal" = 1, "plant" = 1),
+      labels = c("has_signal" = "KO (have signal)", 
+                 "no_signal" = "KO (no signal)", 
+                 "plant" = "Plant Order")
+    ) +
+    theme_void() +
+    labs(title = microbe_type) +
+    theme(legend.position = "right") +
+    geom_node_text(
+      aes(label = ifelse(number_of_host_lineages == "1" & has_signal, gene, 
+                         ifelse(node_type == "Plant_Order", name, NA))),
+      repel = TRUE, size = 2
+    )
+  
+  width <- 20.5
+  height <- 15.5
+  ggsave(paste0(microbe_type, '-KO-Order-network_less3_withKO.png'), p2, width = width, height = height, dpi = 900, type = 'cairo', units = 'cm')
+  ggsave(paste0(microbe_type, '-KO-Order-network_less3_withKO.pdf'), p2, width = width, height = height, units = 'cm')
+  
+
+  p3 <- ggraph(net, layout = "fr") +
+    geom_edge_link(alpha = 1, color = "grey") +
+    geom_node_point(aes(
+      size = ifelse(node_type == "KO", Relative_abundance, 4),
+      shape = ifelse(node_type == "KO",
+                     ifelse(has_signal, "has_signal", "no_signal"),
+                     "plant")
+    ),
+    color = nodes$color_manual,
+    stroke = 0.8,
+    show.legend = TRUE) +
+    scale_size_continuous(
+      name = "Relative abundance(log)",
+      range = c(1, 6)
+    ) +
+    scale_shape_manual(
+      name = "Node type",
+      values = c("has_signal" = 16, "no_signal" = 1, "plant" = 1),
+      labels = c("has_signal" = "KO (have signal)", 
+                 "no_signal" = "KO (no signal)", 
+                 "plant" = "Plant Order")
+    ) +
+    theme_void() +
+    labs(title = microbe_type) +
+    theme(legend.position = "right") +
+    geom_node_text(
+      aes(label = ifelse(number_of_host_lineages == "1" & has_signal, gene, 
+                         ifelse(node_type == "Plant_Order", name, NA))),
+      repel = TRUE, size = 2
+    )
+  
+  width <- 20.5
+  height <- 15.5
+  ggsave(paste0(microbe_type, '-KO-Order-network_less3_withgene.png'), p3, width = width, height = height, dpi = 900, type = 'cairo', units = 'cm')
+  ggsave(paste0(microbe_type, '-KO-Order-network_less3_withgene.pdf'), p3, width = width, height = height, units = 'cm')
+}

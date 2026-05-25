@@ -1,0 +1,206 @@
+---
+title: "FigureS28"
+author: "Xiaolin Wang"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+## R Markdown
+
+```{r }
+### 加载必要包 ----------------------------------------------------------------
+library(dplyr)
+library(tibble)
+library(ggtree)
+library(ggplot2)
+library(ggtreeExtra)
+library(RColorBrewer)
+library(ggnewscale)
+library(reshape2)
+library(scales)
+# BiocManager::install('clusterProfiler')
+# BiocManager::install("DOSE")
+library("clusterProfiler")
+
+### 设置工作目录
+pwd <- dirname(rstudioapi::getSourceEditorContext()$path)
+setwd(pwd)
+
+```
+
+
+```{r }
+###Figure S28
+########################################################################
+############################三界分开，植物order水平
+plant_colors <- read.csv("./data/Tree_top_order_color.csv")
+########################bacteria
+order_enriched_bacterial <- read.csv(file = "./data/bac_core_ko_all_orders_combined_results.csv")
+
+order_enriched_bacterial$Order <- gsub("_.*", "", order_enriched_bacterial$Category)
+order_enriched_bacterial$Order <- factor(order_enriched_bacterial$Order, levels = plant_colors$Order)
+order_enriched_bacterial$Group <- gsub(".*_", "", order_enriched_bacterial$Category)
+order_enriched_bacterial$Group <- factor(order_enriched_bacterial$Group, levels = c("indicators", "coevolved"))
+###去除不属于微生物的富集pathway
+table(order_enriched_bacterial$Description)
+order_enriched_bacterial <- order_enriched_bacterial[!order_enriched_bacterial$Description %in% 
+                                                       c("Yersinia infection", "Th17 cell differentiation", "Th1 and Th2 cell differentiation",
+                                                         "T cell receptor signaling pathway","PD-L1 expression and PD-1 checkpoint pathway in cancer",
+                                                         "Osteoclast differentiation", "Notch signaling pathway", "NF-kappa B signaling pathway",
+                                                         "Adipocytokine signaling pathway"),]
+
+
+###只绘制co-evolved， 没有的也画一个框
+theme_used <-
+  theme(plot.title = element_text(size = 7, color = 'black', hjust = 0.5),
+        plot.subtitle = element_text(size = 6, color = 'black', hjust = 0.5),
+        axis.title = element_text(size = 7, color = 'black'),
+        axis.line = element_blank(),
+        axis.text = element_text(size = 6, color = 'black'),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.title = element_text(size = 7, color = 'black'),
+        legend.text = element_text(size = 6,  color = 'black'),
+        legend.key.size = unit(0.25, 'cm'),
+        # legend.margin = margin(0, 0, 0, -0.2, 'cm'),
+        legend.position = 'right')
+
+
+order_enriched_bacterial2 <- subset(order_enriched_bacterial, Group == "coevolved")
+order_enriched_bacterial2$Order <- factor(order_enriched_bacterial2$Order, levels = plant_colors$Order)
+
+order_enriched_bacterial_g2 <- ggplot(order_enriched_bacterial2, aes(x=-log2(p.adjust), y=Description)) +
+  geom_point(aes(size=Count, color=-log2(p.adjust))) +
+  scale_colour_gradientn(
+    colours = colorRampPalette(c("darkgreen", "red"))(1000),
+    values = rescale(c(min(-log2(order_enriched_bacterial$p.adjust)),
+                       median(-log2(order_enriched_bacterial$p.adjust)),
+                       max(-log2(order_enriched_bacterial$p.adjust))))) +
+  scale_size_continuous(name="gene counts") +
+  labs(title="", x="-log2(p.adjust)", y="") +
+  facet_grid( ~ Order, scales = "fixed", space = "fixed", switch = "x", drop = FALSE) +
+  theme_bw() + 
+  theme(strip.text.x = element_text(size = 5, color = "black"))+
+  theme_used 
+
+order_enriched_bacterial_g2
+
+ggsave(order_enriched_bacterial_g2,
+       filename = "./result/FigureS28A_KO_enrichment_each_plant_orders_bacterial_coevolved_ko.pdf",
+       width = 24, height = 8, units = "cm", dpi = 900, bg = "white")
+
+ggsave(order_enriched_bacterial_g2,
+       filename = "./result/FigureS28A_KO_enrichment_each_plant_orders_bacterial_coevolved_ko.png",
+       width = 24, height = 8, units = "cm", dpi = 900, bg = "white")
+
+
+
+### fungi
+order_enriched_fungal <- read.csv(file = "./data/fun_core_ko_all_orders_combined_results.csv")
+
+
+order_enriched_fungal$Order <- gsub("_.*", "", order_enriched_fungal$Category)
+order_enriched_fungal$Order <- factor(order_enriched_fungal$Order, levels = plant_colors$Order)
+order_enriched_fungal$Group <- gsub(".*_", "", order_enriched_fungal$Category)
+order_enriched_fungal$Group <- factor(order_enriched_fungal$Group, levels = c("indicators", "coevolved"))
+###去除不属于微生物的富集pathway
+table(order_enriched_fungal$Description)
+order_enriched_fungal <- order_enriched_fungal[!order_enriched_fungal$Description %in% 
+                                                 c("Adipocytokine signaling pathway","Alcoholic liver disease",
+                                                   "Autophagy - animal", "Coronavirus disease - COVID-19",
+                                                   "Inflammatory mediator regulation of TRP channels",
+                                                   "Insulin resistance", "Insulin signaling pathway","NF-kappa B signaling pathway",
+                                                   "Non-small cell lung cancer", "Osteoclast differentiation", "PD-L1 expression and PD-1 checkpoint pathway in cancer",
+                                                   "Proximal tubule bicarbonate reclamation","Shigellosis",
+                                                   "T cell receptor signaling pathway", "Th1 and Th2 cell differentiation",
+                                                   "Th17 cell differentiation", "Type II diabetes mellitus",
+                                                   "Vascular smooth muscle contraction"),]
+
+
+
+###只绘制co-evolved， 没有的也画一个框
+order_enriched_fungal2 <- subset(order_enriched_fungal, Group == "coevolved")
+order_enriched_fungal2$Order <- factor(order_enriched_fungal2$Order, levels = plant_colors$Order)
+
+order_enriched_fungal_g2 <- ggplot(order_enriched_fungal2, aes(x=-log2(p.adjust), y=Description)) +
+  geom_point(aes(size=Count, color=-log2(p.adjust))) +
+  scale_colour_gradientn(
+    colours = colorRampPalette(c("darkgreen", "red"))(1000),
+    values = rescale(c(min(-log2(order_enriched_fungal$p.adjust)),
+                       median(-log2(order_enriched_fungal$p.adjust)),
+                       max(-log2(order_enriched_fungal$p.adjust))))) +
+  scale_size_continuous(name="gene counts") +
+  labs(title="", x="-log2(p.adjust)", y="") +
+  facet_grid( ~ Order, scales = "fixed", space = "fixed", switch = "x", drop = FALSE) +
+  theme_bw() + 
+  theme(strip.text.x = element_text(size = 5, color = "black"))+
+  theme_used 
+
+order_enriched_fungal_g2
+
+ggsave(order_enriched_fungal_g2,
+       filename = "./result/FigureS28B_KO_enrichment_each_plant_orders_fungal_coevolved_ko.pdf",
+       width = 24, height = 8, units = "cm", dpi = 900, bg = "white")
+
+ggsave(order_enriched_fungal_g2,
+       filename = "./result/FigureS28B_KO_enrichment_each_plant_orders_fungal_coevolved_ko.png",
+       width = 24, height = 8, units = "cm", dpi = 900, bg = "white")
+
+
+
+########################protists
+order_enriched_protistan <- read.csv(file = "./data/pro_core_ko_all_orders_combined_results.csv")
+
+order_enriched_protistan$Order <- gsub("_.*", "", order_enriched_protistan$Category)
+order_enriched_protistan$Order <- factor(order_enriched_protistan$Order, levels = plant_colors$Order)
+order_enriched_protistan$Group <- gsub(".*_", "", order_enriched_protistan$Category)
+order_enriched_protistan$Group <- factor(order_enriched_protistan$Group, levels = c("indicators", "coevolved"))
+###去除不属于微生物的富集pathway
+table(order_enriched_protistan$Description)
+order_enriched_protistan <- order_enriched_protistan[!order_enriched_protistan$Description %in% 
+                                                       c("Acute myeloid leukemia", "Leukocyte transendothelial migration", "Hematopoietic cell lineage",
+                                                         "Complement and coagulation cascades","Neutrophil extracellular trap formation",
+                                                         "Phagosome", "Cell adhesion molecules", "Motor proteins",
+                                                         "Transcriptional misregulation in cancer", "PPAR signaling pathway",
+                                                         "MAPK signaling pathway - plant", "Biosynthesis of various plant secondary metabolites",
+                                                         "Insect hormone biosynthesis", "Thyroid hormone synthesis", "Alcoholic liver disease",
+                                                         "Diabetic cardiomyopathy", "Leishmaniasis", "Legionellosis","Staphylococcus aureus infection",
+                                                         "Pertussis", "Tuberculosis", "Amoebiasis"),]
+
+
+
+###只绘制co-evolved， 没有的也画一个框
+order_enriched_protistan2 <- subset(order_enriched_protistan, Group == "coevolved")
+order_enriched_protistan2$Order <- factor(order_enriched_protistan2$Order, levels = plant_colors$Order)
+
+order_enriched_protistan_g2 <- ggplot(order_enriched_protistan2, aes(x=-log2(p.adjust), y=Description)) +
+  geom_point(aes(size=Count, color=-log2(p.adjust))) +
+  scale_colour_gradientn(
+    colours = colorRampPalette(c("darkgreen", "red"))(1000),
+    values = rescale(c(min(-log2(order_enriched_protistan$p.adjust)),
+                       median(-log2(order_enriched_protistan$p.adjust)),
+                       max(-log2(order_enriched_protistan$p.adjust))))) +
+  scale_size_continuous(name="gene counts") +
+  labs(title="", x="-log2(p.adjust)", y="") +
+  facet_grid( ~ Order, scales = "fixed", space = "fixed", switch = "x", drop = FALSE) +
+  theme_bw() + 
+  theme(strip.text.x = element_text(size = 5, color = "black"))+
+  theme_used 
+
+order_enriched_protistan_g2
+
+ggsave(order_enriched_protistan_g2,
+       filename = "./result/FigureS28C_KO_enrichment_each_plant_orders_protistan_coevolved_ko.pdf",
+       width = 24, height = 12, units = "cm", dpi = 900, bg = "white")
+
+ggsave(order_enriched_protistan_g2,
+       filename = "./result/FigureS28C_KO_enrichment_each_plant_orders_protistan_coevolved_ko.png",
+       width = 24, height = 12, units = "cm", dpi = 900, bg = "white")
+
+
+
+```

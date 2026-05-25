@@ -1,0 +1,191 @@
+---
+title: "Figure5C"
+author: "Xiaolin Wang"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+
+```{r }
+# 加载必要包 ----------------------------------------------------------------
+library(dplyr)
+library(tibble)
+library(ggtree)
+library(ggplot2)
+library(ggtreeExtra)
+library(RColorBrewer)
+library(ggnewscale)
+library(reshape2)
+library(scales)
+library(treeio)
+library(rstudioapi) # 用于获取工作路径
+
+# 设置工作目录
+pwd <- dirname(rstudioapi::getSourceEditorContext()$path)
+setwd(pwd)
+
+# 数据准备 ------------------------------------------------------------------
+# 导入微生物分类数据
+core_taxonomy <- read.csv('./data/All_core_ASV_taxonomy.csv', row.names = 1)
+
+# 导入系统发育信号(lambda)数据
+lamda_file <- read.csv("./data/absolute_format_core_ASV_phylogenetic_signal_protist.csv", 
+                       row.names = 1) %>% 
+  rownames_to_column("FeatureID")
+
+# 加载系统发育树
+tree <- treeio::read.newick("./data/pro_core_feature_tree.nwk", node.label = "support")
+
+# 导入随机森林生物标志物结果
+rf_file <- read.csv("./data/pro_qa_log_rf_res_diff_ASV.csv", 
+                    sep = ",", header = T, row.names = 1)
+row.names(rf_file) <- gsub("\\|.*", "", row.names(rf_file))
+rf_file$ASVID <- row.names(rf_file) 
+
+# 载入颜色配置
+class_colors <- read.csv("./data/Protist_top10Class_color_meanValue.csv")
+plant_colors <- read.csv("./data/Tree_top10Order_color.csv")
+
+# 数据合并
+group_file <- core_taxonomy %>%
+  left_join(lamda_file, by = "FeatureID") %>%
+  left_join(rf_file, by = "ASVID") %>%
+  filter(FeatureID %in% tree@phylo$tip.label) %>%
+  column_to_rownames("FeatureID")
+
+# 分类处理和标签设置
+group_file <- group_file %>%
+  mutate(
+    Class = case_when(
+      Class %in% class_colors$Taxa[1:10] ~ Class,       # 保留前10个指定分类
+      Class == "" ~ "Unassigned",                       # 处理空字符串为Unassigned
+      TRUE ~ "Others"                                   # 其他情况归为Others
+    ),
+    Class = factor(Class, levels = class_colors$Taxa),
+    Group = if_else(
+      FDR < 0.05 & P.adj < 0.05, Group, #lambda显著，且为rf鉴定biomarker 
+      ""
+    )
+  )
+
+# 显著性统计
+cat("显著系统发育信号(FDR<0.05):", sum(group_file$FDR < 0.05), "\n")
+cat("显著随机森林标记(P.adj<0.05):", sum(group_file$P.adj < 0.05), "\n")
+cat("双显著标记数量:", sum(group_file$FDR < 0.05 & group_file$P.adj < 0.05), "\n")
+
+# 可视化设置 ----------------------------------------------------------------
+
+# 创建分组列表
+groupInfo <- split(
+  rownames(group_file), 
+  group_file$Class  # 使用微生物Class作为分组依据
+)
+
+# 应用分组到系统发育树
+tree_grouped <- ggtree::groupOTU(
+  tree,
+  groupInfo,
+  group_name = "Taxonomy"  # 自定义分组变量名
+)
+
+# 准备可视化数据
+lambda_plot <- group_file %>%
+  rownames_to_column("label") %>%
+  select(label, lambda) 
+
+rf_plot <- group_file %>%
+  rownames_to_column("label") %>%
+  select(label, Group) %>%
+  filter(!is.na(Group) & Group != "") %>%
+  mutate(Group = factor(Group))
+
+# 完整可视化流程 ----------------------------------------------------------
+# 基础树结构
+base_tree <- ggtree(tree_grouped, layout = 'fan', right = TRUE, 
+                    linewidth = 0.15, open.angle = 15) +  
+  geom_aline(aes(color = Taxonomy), linetype = 'solid', size = 0.2, linewidth = 0.15,
+             key_glyph = 'rect') +
+  scale_color_manual(values = class_colors$Color, 
+                     breaks = class_colors$Taxa) + 
+  theme(legend.position = "right") +
+  ggnewscale::new_scale_color()
+
+# 最终绘图
+final_plot <- base_tree +
+  # 系统发育信号层
+  geom_fruit(
+    data = lambda_plot,
+    geom = geom_tile,
+    mapping = aes(y=label, x = "Lambda", fill = lambda),
+    color = NA,
+    width = 0.12,
+    offset = 0.05,
+    axis.params = list(
+      axis = "x",
+      line.color = "white",
+      text.size = 0.6,
+      nbreak = 2,
+      text.angle = 85,
+      vjust = 0,
+      hjust = 1)
+  ) +
+  scale_fill_gradientn(colours = colorRampPalette(c("white", "red"))(1000), 
+                       name = "Phylogenetic Signal (lambda)") +
+  new_scale_fill()  +
+  # 随机森林层
+  geom_fruit(
+    data = rf_plot,
+    geom = geom_point, 
+    mapping = aes(y = label, x = "Coevolved", color = Group), 
+    size = 0.01,
+    pwidth = 0.1,
+    offset = 0.05,
+    axis.params = list(
+      axis = "x",
+      line.color = "white",
+      text.size = 0.6,
+      nbreak = 2,
+      text.angle = 85,
+      vjust = 0,
+      hjust = 1),
+    grid.params = list(vline = TRUE)
+  ) +
+  scale_color_manual(
+    values = plant_colors$Color2, 
+    breaks = plant_colors$Order,
+    name = "Coevolved Host"
+  )
+
+# 保存带图例版本
+ggsave(final_plot,
+       filename = "./result/Figure5C_protistan_core_ASVs_lambda_rf.pdf", 
+       width = 12, height = 12,  dpi = 900, bg = "white")
+
+# 无图例版本
+final_plot_nolegend <- final_plot + 
+  theme(legend.position = "none") +
+  theme(plot.margin = grid::unit(c(0,0,0,0), "mm"))
+
+# 保存无图例版本（多种格式）
+ggsave(final_plot_nolegend,
+       filename = "./result/Figure5C_protistan_core_ASVs_lambda_rf_nolegend.pdf",
+       width = 115/2, height = 115/2, units = "mm", dpi = 900, bg = "white")
+
+ggsave(final_plot_nolegend,
+       filename = "./result/Figure5C_protistan_core_ASVs_lambda_rf_nolegend.tiff",
+       width = 115/2, height = 115/2, units = "mm", dpi = 900, bg = "white")
+
+ggsave(final_plot_nolegend,
+       filename = "./result/Figure5C_protistan_core_ASVs_lambda_rf_nolegend.jpg",
+       width = 115/2, height = 115/2, units = "mm", dpi = 900, bg = "white")
+
+# 显示最终图形（带图例）
+final_plot
+
+```
