@@ -1,0 +1,368 @@
+### Settings -------------------------------------------------------------------
+# Set Work Path
+pwd <- dirname(rstudioapi::getSourceEditorContext()[["path"]])
+setwd(pwd)
+
+# Import package
+# 加载必要的包
+library(dplyr)
+library(tidyr)
+library(rstatix)
+library(agricolae)
+library(stats)
+library(ggplot2)
+library(ggtree)
+library(ape)
+library(geosphere)
+
+#########################################################
+#### 在Plant tree sig KO barplot的基础上进一步统计可视化
+####循环可视化每个KO的组间差异boxplot
+
+# We only identified 4 fungal KOs coevolved with specific plant lineages.
+
+### Import data ----------------------------------------------------------------
+tree_file <- read.tree("../../../../metadata/tree_metadata_merge_info_final_align_tree.nwk")
+metadata_rs <- read.csv("../../../../metadata/rhizosphere_metadata_merge_info.csv")
+metadata_tree <- read.csv("../../../../metadata/tree_metadata_merge_info.csv")
+
+### Keep sample with tree_ITS_reads
+metadata_rs <- metadata_rs[metadata_rs$TreeID %in% tree_file$tip.label, ]
+match(tree_file$tip.label, unique(metadata_rs$TreeID)) ###说明有的树木样本没有扩增子测序数据
+
+tree_dist <- as.data.frame(cophenetic.phylo(tree_file)) 
+###cophenetic.phylo computes the pairwise distances between the pairs of tips from a phylogenetic tree using its branch lengths.
+
+######################################################################################################
+# 读取top10植物目信息
+top_tree <- read.csv("../../../../metadata/Tree_top_order_color.csv", fileEncoding = "GBK")
+top10orders <- top_tree$Order[1:10]
+
+
+###############################################################################
+####(1) select KO
+select_KO <- read.csv(file = "./stats/pro_order_coevoled_top18_ko_qa.csv", fileEncoding = "GBK")
+row.names(select_KO) <- select_KO$KOID
+select_KO <- as.data.frame(t(select_KO[,-c(1:3)]))
+select_KO$TreeID <- row.names(select_KO)
+
+select_KO <- merge.data.frame(metadata_tree[,c(1,8)], select_KO, by = "TreeID")
+select_KO$Group <- ifelse(select_KO$Order %in% top10orders, select_KO$Order, "Others")
+select_KO$Group <- factor(select_KO$Group, levels = c(top10orders, "Others"))
+
+select_KO_info <- read.csv(file = "./stats/pro_order_coevoled_top18_ko_lambda_rf.csv", fileEncoding = "GBK")
+
+###########################################
+ggtheme <- 
+  theme(
+    text = element_text(color = "black", size = 8),
+    plot.title = element_text(size = 8, hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5),
+    legend.title = element_text(size = 8),
+    axis.title = element_text(size = 8),
+    axis.text = element_text(size = 8, color = "black"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(color = "black", size = 7, margin = margin(0.1, 0.1, 0.1, 0.1, "cm")),
+    panel.spacing = unit(0.1, "cm"),
+    legend.box.spacing = unit(0.1,"cm"),
+    legend.key.size = unit(0.25, "cm"),
+    legend.position = "none"
+  )
+
+### 计算组间丰度差异统计和多重比较结果
+
+calculate_group_stats <- function(data, value_col, group_col, alpha = 0.05, p_adjust_method = "fdr") {
+  
+  # 重命名列以便于处理
+  names(data)[names(data) == value_col] <- "Abundance"
+  names(data)[names(data) == group_col] <- "Group"
+  
+  # 确保Group是因子
+  if (!is.factor(data$Group)) {
+    data$Group <- factor(data$Group)
+  }
+  
+  ###########################################
+  # 1. 计算每组的基本统计量
+  ###########################################
+  summarise_df <- data %>%
+    group_by(Group) %>%
+    summarise(
+      n = length(Abundance),
+      mean = mean(Abundance, na.rm = TRUE),
+      min = min(Abundance, na.rm = TRUE),
+      max = max(Abundance, na.rm = TRUE),
+      sd = sd(Abundance, na.rm = TRUE),
+      se = sd / sqrt(n),
+      ci = qt(1 - alpha/2, df = n - 1) * se
+    ) %>%
+    mutate(allmax = max(max))
+  
+  #########################################
+  # 2. 非参数检验
+  ###########################################
+  # Kruskal-Wallis检验
+  kruskal_test <- kruskal.test(Abundance ~ Group, data = data)
+  sig_value <- kruskal_test$p.value
+  
+  # Dunn事后检验
+  dunn_test <- rstatix::dunn_test(data, Abundance ~ Group, p.adjust.method = p_adjust_method)
+  
+  # 添加显著性标记
+  pvalue_df <- data.frame(
+    KruskalWallis = sig_value, 
+    dunn_test[c("group1", "group2", "p.adj")]
+  )
+  pvalue_df$label <- ifelse(pvalue_df$p.adj < 0.001, "***",
+                            ifelse(pvalue_df$p.adj < 0.01, "**", 
+                                   ifelse(pvalue_df$p.adj < 0.05, "*", "n.s.")))
+  
+  ###########################################
+  # 3. 生成p值矩阵
+  ###########################################
+  n <- nrow(summarise_df)
+  pvalue_matrix <- matrix(1, ncol = n, nrow = n)
+  k <- 0
+  
+  for(i in 1:(n - 1)) { 
+    for(j in (i + 1):n) { 
+      k <- k + 1
+      pvalue_matrix[i, j] <- pvalue_df$p.adj[k]
+      pvalue_matrix[j, i] <- pvalue_df$p.adj[k]
+    }
+  }
+  
+  ###########################################
+  # 4. 生成显著性字母标记
+  ###########################################
+  # 使用agricolae包
+  letter_df <- agricolae::orderPvalue(
+    summarise_df$Group, 
+    summarise_df$mean, 
+    alpha, 
+    pvalue_matrix, 
+    console = FALSE
+  )
+  
+  # 确保字母标记的顺序与summarise_df一致
+  letter_df <- letter_df[levels(data$Group), ]
+  summarise_df$label <- letter_df$groups
+  
+  ###########################################
+  # 5. 返回结果列表
+  ###########################################
+  result_list <- list(
+    summary_df = summarise_df,
+    kruskal_test = kruskal_test,
+    dunn_test = dunn_test,
+    letter_df = letter_df,
+    pvalue_matrix = pvalue_matrix
+  )
+  
+  return(result_list)
+}
+
+
+
+###统计abundance差异
+
+#####################################
+###循环出图
+# 定义要循环的因子
+ko_ids <- names(select_KO)[3:30]
+
+# 设置保存目录
+plot_dir <- "./boxplots"
+if (!dir.exists(plot_dir)) {
+  dir.create(plot_dir, recursive = TRUE)
+}
+
+# 循环生成所有图形
+
+for (ko in ko_ids) {
+  
+  # 获取对应的数据框
+  # 测试：ko <- "K03446"
+  select_KO_abundance_summarise <- calculate_group_stats(data = select_KO, value_col = ko, group_col = "Group")
+  summary_data <- select_KO_abundance_summarise$summary_df
+  
+  ko_info <- select_KO_info[select_KO_info$KOID == ko, c("KOID", "Description")]
+  ko_lambda <- select_KO_info[select_KO_info$KOID == ko, c("lambda", "padj")]
+  
+  
+  # 创建图形
+  p <- ggplot(data = select_KO, mapping = aes(x = Group, y = .data[[ko]])) +
+    geom_jitter(mapping = aes(color = Group), width = 0.2, alpha = 0.5, size = 2, stroke = 0) +
+    geom_boxplot(width = 0.3, alpha = 0.2, na.rm = TRUE) +
+    geom_violin(width = 0.5, alpha = 0.2, na.rm = TRUE) +
+    geom_text(
+      data = summary_data,
+      mapping = aes(x = Group, y = max + 10, label = label),
+      position = position_dodge(0.9),
+      size = 8 / 2.835
+    ) +
+    
+    labs(
+      x = NULL,
+      y = "TPM",
+      title = paste0(ko_info$KOID[1], " | ", ko_info$Description[1]),
+      subtitle = paste0(
+        "Pagel's Lambda = ", format(ko_lambda$lambda[1], scientific = F, digits = 3),
+        ", FDR = ", format(ko_lambda$padj[1], scientific = TRUE, digits = 3), "\n",
+        "Kruskal-Wallis P = ", format(select_KO_abundance_summarise$kruskal_test$p.value, 
+                                      scientific = TRUE, digits = 3)
+      )
+    ) + 
+    scale_color_manual(values = top_tree$Color2) +
+    theme_bw() + 
+    ggtheme
+  
+  # 设置保存参数
+  name <- file.path(plot_dir, paste0(ko, "_abundance_across_top10orders"))
+  width <- 8
+  height <- 6
+  
+  # 保存图形
+  ggsave(paste0(name, ".png"), p, width = width, height = height, dpi = 600, units = "cm")
+  ggsave(paste0(name, ".pdf"), p, width = width, height = height, units = "cm")
+  
+}
+
+
+
+###############################################################################
+###可视化每个目的代表性KO
+# KOID	TPM_mean	Kingdom	lambda	logL	logL0	P	padj	KOLabel	gene	Description	Tree_Class	rf_FDR_Class	Tree_Order	rf_FDR_Order	Tree_Family	rf_FDR_Family
+# K02274	1.216764957	Protists	0.258962625	-836.055584	-842.030097	0.00054676	0.013999323	K02274|coxA, ctaD	coxA, ctaD	cytochrome c oxidase subunit I [EC:7.1.1.9]	NA	NA	Rosales	0.030075397	Urticaceae	0.001996489
+# K04946	0.036265938	Protists	0.116056755	-1140.554142	-1148.336633	7.97E-05	0.003265756	K04946|KCNT1, KNA1.1	KCNT1, KNA1.1	potassium channel subfamily T member 1	NA	NA	Malpighiales	0.002169057	Phyllanthaceae	0.017897511
+# K05973	0.029578823	Protists	0.214668052	-1264.214335	-1272.868053	3.18E-05	0.001930106	K05973|phaZ	phaZ	poly(3-hydroxybutyrate) depolymerase [EC:3.1.1.75]	NA	NA	Lamiales	0.027122754	Acanthaceae	0.002744791
+# K11907	0.104750532	Protists	0.14521808	-1218.697579	-1225.180062	0.000317374	0.009070997	K11907|vasG, clpV	vasG, clpV	type VI secretion system protein VasG	NA	NA	Asparagales	0.002156958	Asparagaceae	0.018639689
+# K03446	0.105373631	Protists	0.069501449	-1247.97729	-1257.196181	1.76E-05	0.00126907	K03446|emrB	emrB	MFS transporter, DHA2 family, multidrug resistance protein	NA	NA	Fabales	0.00115964	Fabaceae	0.000744683
+
+
+# 定义要循环的因子
+library("patchwork")
+
+ggtheme2 <- 
+  theme(
+    text = element_text(color = "black", size = 6),
+    plot.title = element_text(size = 6, hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5),
+    legend.title = element_text(size = 6),
+    axis.title = element_text(size = 6),
+    axis.text = element_text(size = 6, color = "black"),
+    # axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(color = "black", size = 6, margin = margin(0.1, 0.1, 0.1, 0.1, "cm")),
+    panel.spacing = unit(0.1, "cm"),
+    legend.box.spacing = unit(0.1,"cm"),
+    legend.key.size = unit(0.25, "cm"),
+    legend.position = "none"
+  )
+
+
+###############################################################################
+### 可视化7个目的代表性KO
+# 定义要循环的KO列表
+rep_kos <- c("K03446", "K02274", "K05973", "K04946", "K11907")
+
+# 设置保存目录
+plot_dir <- "./boxplots"
+if (!dir.exists(plot_dir)) {
+  dir.create(plot_dir, recursive = TRUE)
+}
+
+# 创建存储图形的列表
+plot_list <- list()
+
+# 定义格式化函数
+format_p_value <- function(p) {
+  if (p < 0.001) {
+    return("< 0.001")
+  } else {
+    return(format(p, scientific = FALSE, digits = 3))
+  }
+}
+
+# 循环生成所有图形
+for (i in seq_along(rep_kos)) {
+  ko <- rep_kos[i]
+  
+  # 获取对应的数据框
+  select_KO_abundance_summarise <- calculate_group_stats(data = select_KO, value_col = ko, group_col = "Group")
+  summary_data <- select_KO_abundance_summarise$summary_df
+  
+  # 获取KO信息
+  ko_info <- select_KO_info[select_KO_info$KOID == ko, c("KOID", "KOLabel", "Description")]
+  ko_lambda <- select_KO_info[select_KO_info$KOID == ko, c("lambda", "padj")]
+  
+  # 创建y轴标签（包含描述信息）
+  y_label <- if (nrow(ko_info) > 0) {
+    paste0(ko_info$KOID[1], ": ", ko_info$Description[1])
+  } else {
+    ko
+  }
+  
+  # 创建图形（使用coord_flip旋转坐标轴）
+  p <- ggplot(data = select_KO, mapping = aes(x = Group, y = log(.data[[ko]]+1))) +
+    geom_jitter(mapping = aes(color = Group), width = 0.2, alpha = 0.5, size = 2, stroke = 0) +
+    geom_boxplot(width = 0.3, alpha = 0.2, na.rm = TRUE) +
+    geom_violin(width = 0.5, alpha = 0.2, na.rm = TRUE) +
+    geom_text(
+      data = summary_data,
+      mapping = aes(x = Group, y = log(1+max*2), label = label),  # 使用固定的偏移量
+      position = position_dodge(0.9),
+      size = 6 / 2.835
+    ) +
+    coord_flip() +  # 旋转坐标轴
+    labs(
+      x = NULL,
+      y = paste0(ko_info$KOLabel[1], "\n",
+                 "(λ=", round(ko_lambda$lambda[1], 2),
+                 ", P=", format(ko_lambda$padj[1], scientific = TRUE, digits = 2), ")"),
+      title = NULL
+    ) + 
+    scale_color_manual(values = top_tree$Color2) +
+    theme_bw() + 
+    ggtheme2
+  
+  # 只对第一个图显示Y轴标签
+  if (i != 1) {
+    p <- p + theme(axis.text.y = element_blank(),  # 隐藏y轴文本
+                   axis.ticks.y = element_blank())  # 隐藏y轴刻度
+  } else {
+    # 第一个图保持完整的Y轴标签
+    p <- p + theme(axis.text.y = element_text(angle = 0, hjust = 1))
+  }
+  
+  # 将图存入列表
+  plot_list[[i]] <- p
+  
+  cat(paste0("已生成: ", ko, "\n"))
+}
+
+# 设置图标题（可选）
+# 如果需要为整个组合图添加标题，可以使用patchwork的plot_annotation
+library(patchwork)
+
+# 组合图形（7个图，1行布局）
+combined_plot <- wrap_plots(plot_list, ncol = 5) +
+  plot_layout(widths = c(1, 1, 1, 1, 1),  # 稍微调整宽度比例
+              heights = 1,
+              guides = "collect") &
+  theme(
+    plot.margin = margin(0.5, 0.5, 0.5, 0.5, "mm"),  # 减小图形边距
+    panel.spacing = unit(2, "mm")  # 减小子图之间的间距
+  )
+
+# 设置保存参数
+name <- file.path(plot_dir, "representative_fungal_KOs_top10orders-wide-version2")
+width <- 15  # 增加宽度以适应3列
+height <- 6  # 增加高度以适应更多行
+
+# 保存组合图形
+ggsave(paste0(name, ".png"), combined_plot, width = width, height = height, dpi = 600, units = "cm")
+ggsave(paste0(name, ".pdf"), combined_plot, width = width, height = height, units = "cm")
+
+# 显示组合图
+print(combined_plot)
+

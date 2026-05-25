@@ -1,0 +1,76 @@
+### Settings -------------------------------------------------------------------
+# Set Work Path
+pwd <- dirname(rstudioapi::getSourceEditorContext()$path)
+setwd(pwd)
+
+# Set seed
+set.seed(1994)
+
+# Create directory
+dir_name <- "03-robustness"
+if (!file.exists(dir_name)) {dir.create(dir_name, recursive = T)}
+
+# Import package
+library(tidyverse)
+library(RColorBrewer)
+
+source('../../00-rawdata/scripts/get_network_robustness.R')
+
+### Define variable -----------------------------------------------------------
+p_adjust_method <- "fdr"
+
+type <- c("all", "inter", "intra")
+target_clades <- c('Bacteria', 'Fungi', 'Protist')
+color_manual <- colorRampPalette(brewer.pal(3, 'Accent'))(3)
+# ------------------------------------------------------------------------------
+
+### Get results ----------------------------------------------------------------
+for (typ in type) {
+    first_prefix <- ifelse(typ == "all", "01", ifelse(typ == "inter", "02", "03"))
+    second_prefix <- ifelse(typ == "all", "02", "01")
+    
+    dir_path <- paste0("../", first_prefix, "-", typ, "_network/", second_prefix, "-get_", typ, "_network_property")
+    
+    hub_info <- read.csv(paste0(dir_path, '/', typ, '_network_hub_info.csv'),row.names = 1)
+    tax_table <- read.csv(paste0(dir_path, '/', typ, '_tax_table.csv'), row.names = 1)
+    r_table <- read.csv(paste0(dir_path, '/', typ, '_r_table.csv'), row.names = 1)
+    otu_table <- read.csv(paste0(dir_path, '/', typ, '_otu_table.csv'), row.names = 1)
+    otu_table <- otu_table[row.names(r_table),]
+    
+    tmp_df <- merge(hub_info, tax_table, by = 'row.names') %>%
+        filter(roles != 'Peripherals') %>%
+        arrange(desc(igraph.degree))
+    
+    # 1. By cumulative ASV
+    data_df <- data.frame(row.names = 1:nrow(tmp_df))
+    for (i in 1:nrow(tmp_df)) {
+        target_remove_robustness <-
+            get_target_remove_robustness(r_table, otu_table, rm_feature = tmp_df$ASVID[1:i], table_type = 'absolute')
+        random_remove_robustness_df <-
+            get_random_remove_robustness(r_table, otu_table, rm_percent = i/nrow(r_table), table_type = 'absolute')
+        random_remove_robustness <- mean(random_remove_robustness_df$remain_percen)
+        
+        data_df[i, c('target', 'random')] <- c(target_remove_robustness, random_remove_robustness)
+    }
+    
+    name <- paste0(dir_name, "/", typ, "_robustness_by_cumulative_asv")
+    write.csv(data_df, paste0(name, ".csv"), quote = F)
+    
+    # 2. By Kingdom
+    data_df <- data.frame(row.names = target_clades)
+    for (cla in target_clades) {
+        rm_feature <- tmp_df[tmp_df$Clade == cla, 'ASVID']
+        n <- length(rm_feature)
+        target_remove_robustness <-
+            get_target_remove_robustness(r_table, otu_table, rm_feature = rm_feature, table_type = 'absolute')
+        random_remove_robustness_df <-
+            get_random_remove_robustness(r_table, otu_table, rm_percent = n/nrow(r_table), table_type = 'absolute')
+        random_remove_robustness <- mean(random_remove_robustness_df$remain_percen)
+        data_df[cla, c('number', 'target', 'random')] <- c(n, target_remove_robustness, random_remove_robustness)
+    }
+    
+    name <- paste0(dir_name, "/", typ, "_robustness_by_kingdom")
+    write.csv(data_df, paste0(name, ".csv"), quote = F)
+}
+
+# ------------------------------------------------------------------------------

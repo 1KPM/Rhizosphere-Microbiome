@@ -1,0 +1,276 @@
+# ******************************************************************************
+# @File: 02-degree.R
+# @Author: Mingxing Wang
+# @Email: xing592798030@163.com
+# @Date: 2026-03-03 09:34:31
+# @License: Copyright (C) 2026 Mingxing Wang. All rights reserved.
+# @Reference: Mingxing Wang
+# @Description: 
+# ******************************************************************************
+
+
+### Settings -------------------------------------------------------------------
+# Set Work Path
+pwd <- dirname(rstudioapi::getSourceEditorContext()$path)
+setwd(pwd)
+
+# Set seed
+set.seed(1994)
+
+# Create directory
+dir_name <- "07-closeness_betweenness"
+if (!file.exists(dir_name)) {dir.create(dir_name, recursive = T)}
+
+# Import package
+library(tidyverse)
+library(RColorBrewer)
+library(patchwork)
+
+
+### Define variable -----------------------------------------------------------
+p_adjust_method <- "fdr"
+
+type <- c("all", "inter", "intra")
+color_manual <- colorRampPalette(brewer.pal(3, 'Accent'))(3)
+# ------------------------------------------------------------------------------
+
+
+### Get betweenness results ----------------------------------------------------------------
+all_data <- list()
+all_labels <- list()
+
+for (typ in type) {
+  first_prefix <- ifelse(typ == "all", "01", ifelse(typ == "inter", "02", "03"))
+  second_prefix <- ifelse(typ == "all", "02", "01")
+  dir_path <- paste0("../", first_prefix, "-", typ, "_network/", second_prefix, "-get_", typ, "_network_property")
+  
+  tmp_df <- read.csv(paste0(dir_path, '/', typ, '_network_hub_info.csv'), row.names = 1)
+  
+  tmp_df <- tmp_df %>%
+    mutate(Clade = case_when(
+      substr(.[[1]], 1, 1) == "b" ~ "Bacteria",
+      substr(.[[1]], 1, 1) == "f" ~ "Fungi",
+      substr(.[[1]], 1, 1) == "p" ~ "Protist",
+      TRUE ~ NA_character_
+    )) %>%
+    mutate(Clade = ifelse(Clade == "Protist", "Protists", Clade),
+           Clade = factor(Clade, levels = c("Bacteria", "Fungi", "Protists")))
+  
+  data_df <- tmp_df[c("Clade", "betweenness_centrality")]
+  names(data_df) <- c("Group", "Value")
+  data_df <- data_df %>% filter(!is.na(Group))
+  
+  summarise_df <- data_df %>%
+    group_by(Group) %>%
+    summarise(
+      n = n(),
+      mean = mean(Value, na.rm = TRUE),
+      min = min(Value, na.rm = TRUE),
+      max = max(Value, na.rm = TRUE),
+      sd = sd(Value, na.rm = TRUE),
+      se = sd / sqrt(n),
+      ci = qt(0.975, df = n - 1) * se
+    ) %>%
+    mutate(allmax = max(max))
+  
+  kruskal_test <- kruskal.test(Value ~ Group, data = data_df)
+  sig_value <- kruskal_test$p.value
+  dunn_test <- rstatix::dunn_test(data_df, Value ~ Group, p.adjust.method = p_adjust_method)
+  pvalue_df <- data.frame(KruskalWallis = sig_value, dunn_test[c("group1", "group2", "p.adj")])
+  pvalue_df$label <- ifelse(pvalue_df$p.adj < 0.001, "***",
+                            ifelse(pvalue_df$p.adj < 0.01, "**", 
+                                   ifelse(pvalue_df$p.adj < 0.05, "*", "n.s.")))
+  
+  n <- nrow(summarise_df)
+  pvalue_matrix <- matrix(1, ncol = n, nrow = n)
+  k <- 0
+  for(i in 1:(n - 1)) { 
+    for(j in (i + 1):n) { 
+      k <- k + 1
+      pvalue_matrix[i, j] <- pvalue_df$p.adj[k]
+      pvalue_matrix[j, i] <- pvalue_df$p.adj[k]
+    }
+  }
+  letter_df <- agricolae::orderPvalue(summarise_df$Group, summarise_df$mean, 0.05, pvalue_matrix, console = TRUE)
+  letter_df <- letter_df[levels(data_df$Group), ]   # 按因子水平排序
+  summarise_df$label <- letter_df$groups
+  
+  summarise_df$label_x <- summarise_df$max + summarise_df$allmax * 0.1
+  
+  data_df$typ <- typ
+  label_sub <- summarise_df[, c("Group", "label", "label_x")]
+  label_sub$typ <- typ
+  
+  all_data[[typ]] <- data_df
+  all_labels[[typ]] <- label_sub
+  
+  write.csv(data_df, paste0(dir_name, "/", typ, "_betweenness_data.csv"), row.names = FALSE)
+  write.csv(summarise_df, paste0(dir_name, "/", typ, "_betweenness_summarise.csv"), row.names = FALSE)
+  write.csv(pvalue_df, paste0(dir_name, "/", typ, "_betweenness_pvalue.csv"), row.names = FALSE)
+}
+
+merged_data <- bind_rows(all_data)
+merged_labels <- bind_rows(all_labels)
+merged_data$typ[merged_data$typ == "all"]   <- "Whole network (KOs)"
+merged_data$typ[merged_data$typ == "inter"] <- "Interkingdom network (KOs)"
+merged_data$typ[merged_data$typ == "intra"] <- "Intrakingdom network (KOs)"
+merged_data$typ <- factor(merged_data$typ, levels = c("Whole network (KOs)", "Interkingdom network (KOs)","Intrakingdom network (KOs)"))
+merged_labels$typ[merged_labels$typ == "all"]   <- "Whole network (KOs)"
+merged_labels$typ[merged_labels$typ == "inter"] <- "Interkingdom network (KOs)"
+merged_labels$typ[merged_labels$typ == "intra"] <- "Intrakingdom network (KOs)"
+merged_labels$typ <- factor(merged_labels$typ, levels = c("Whole network (KOs)", "Interkingdom network (KOs)","Intrakingdom network (KOs)"))
+
+p_between <- ggplot(merged_data, aes(x = Value, y = Group)) +
+  geom_point(aes(color = Group), 
+             position = position_jitterdodge(dodge.width = 0.6), 
+             alpha = 0.4, size = 3, stroke = 0) +
+  geom_boxplot(width = 0.3, alpha = 0.2, na.rm = TRUE) +
+  geom_violin(width = 0.5, alpha = 0.2, na.rm = TRUE) +
+  geom_text(data = merged_labels,
+            aes(x = label_x, y = Group, label = label),
+            size = 7 / 2.835,
+            hjust = 0) +
+  labs(x = "Betweenness centrality", y = "") +
+  scale_color_manual(values = color_manual) +
+  facet_grid(typ ~ ., scales = "free", space = "fixed") +
+  coord_flip() +
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 7, color = "black", hjust = 0.5),
+    plot.subtitle = element_text(size = 6, color = "black", hjust = 0.5),
+    axis.title = element_text(size = 7, color = "black"),
+    axis.text = element_text(size = 6, color = "black"),
+    legend.title = element_text(size = 7, color = "black"),
+    legend.text = element_text(size = 6, color = "black"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    legend.position = "none",
+    strip.text = element_text(size = 7, color = "black"),
+    plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "cm")
+  )
+
+
+### Get closeness results ----------------------------------------------------------------
+all_data <- list()
+all_labels <- list()
+
+for (typ in type) {
+  first_prefix <- ifelse(typ == "all", "01", ifelse(typ == "inter", "02", "03"))
+  second_prefix <- ifelse(typ == "all", "02", "01")
+  dir_path <- paste0("../", first_prefix, "-", typ, "_network/", second_prefix, "-get_", typ, "_network_property")
+  
+  tmp_df <- read.csv(paste0(dir_path, '/', typ, '_network_hub_info.csv'), row.names = 1)
+  
+  tmp_df <- tmp_df %>%
+    mutate(Clade = case_when(
+      substr(.[[1]], 1, 1) == "b" ~ "Bacteria",
+      substr(.[[1]], 1, 1) == "f" ~ "Fungi",
+      substr(.[[1]], 1, 1) == "p" ~ "Protist",
+      TRUE ~ NA_character_
+    )) %>%
+    mutate(Clade = ifelse(Clade == "Protist", "Protists", Clade),
+           Clade = factor(Clade, levels = c("Bacteria", "Fungi", "Protists")))
+  
+  data_df <- tmp_df[c("Clade", "closeness_centrality")]
+  names(data_df) <- c("Group", "Value")
+  data_df <- data_df %>% filter(!is.na(Group))
+  
+  summarise_df <- data_df %>%
+    group_by(Group) %>%
+    summarise(
+      n = n(),
+      mean = mean(Value, na.rm = TRUE),
+      min = min(Value, na.rm = TRUE),
+      max = max(Value, na.rm = TRUE),
+      sd = sd(Value, na.rm = TRUE),
+      se = sd / sqrt(n),
+      ci = qt(0.975, df = n - 1) * se
+    ) %>%
+    mutate(allmax = max(max))
+  
+  kruskal_test <- kruskal.test(Value ~ Group, data = data_df)
+  sig_value <- kruskal_test$p.value
+  dunn_test <- rstatix::dunn_test(data_df, Value ~ Group, p.adjust.method = p_adjust_method)
+  pvalue_df <- data.frame(KruskalWallis = sig_value, dunn_test[c("group1", "group2", "p.adj")])
+  pvalue_df$label <- ifelse(pvalue_df$p.adj < 0.001, "***",
+                            ifelse(pvalue_df$p.adj < 0.01, "**", 
+                                   ifelse(pvalue_df$p.adj < 0.05, "*", "n.s.")))
+  
+  n <- nrow(summarise_df)
+  pvalue_matrix <- matrix(1, ncol = n, nrow = n)
+  k <- 0
+  for(i in 1:(n - 1)) { 
+    for(j in (i + 1):n) { 
+      k <- k + 1
+      pvalue_matrix[i, j] <- pvalue_df$p.adj[k]
+      pvalue_matrix[j, i] <- pvalue_df$p.adj[k]
+    }
+  }
+  letter_df <- agricolae::orderPvalue(summarise_df$Group, summarise_df$mean, 0.05, pvalue_matrix, console = TRUE)
+  letter_df <- letter_df[levels(data_df$Group), ]   # 按因子水平排序
+  summarise_df$label <- letter_df$groups
+  
+  summarise_df$label_x <- summarise_df$max + summarise_df$allmax * 0.1
+  
+  data_df$typ <- typ
+  label_sub <- summarise_df[, c("Group", "label", "label_x")]
+  label_sub$typ <- typ
+  
+  all_data[[typ]] <- data_df
+  all_labels[[typ]] <- label_sub
+  
+  write.csv(data_df, paste0(dir_name, "/", typ, "_closeness_data.csv"), row.names = FALSE)
+  write.csv(summarise_df, paste0(dir_name, "/", typ, "_closeness_summarise.csv"), row.names = FALSE)
+  write.csv(pvalue_df, paste0(dir_name, "/", typ, "_closeness_pvalue.csv"), row.names = FALSE)
+}
+
+merged_data <- bind_rows(all_data)
+merged_labels <- bind_rows(all_labels)
+merged_data$typ[merged_data$typ == "all"]   <- "Whole network (KOs)"
+merged_data$typ[merged_data$typ == "inter"] <- "Interkingdom network (KOs)"
+merged_data$typ[merged_data$typ == "intra"] <- "Intrakingdom network (KOs)"
+merged_data$typ <- factor(merged_data$typ, levels = c("Whole network (KOs)", "Interkingdom network (KOs)","Intrakingdom network (KOs)"))
+merged_labels$typ[merged_labels$typ == "all"]   <- "Whole network (KOs)"
+merged_labels$typ[merged_labels$typ == "inter"] <- "Interkingdom network (KOs)"
+merged_labels$typ[merged_labels$typ == "intra"] <- "Intrakingdom network (KOs)"
+merged_labels$typ <- factor(merged_labels$typ, levels = c("Whole network (KOs)", "Interkingdom network (KOs)","Intrakingdom network (KOs)"))
+
+p_close <- ggplot(merged_data, aes(x = Value, y = Group)) +
+  geom_point(aes(color = Group), 
+             position = position_jitterdodge(dodge.width = 0.6), 
+             alpha = 0.4, size = 3, stroke = 0) +
+  geom_boxplot(width = 0.3, alpha = 0.2, na.rm = TRUE) +
+  geom_violin(width = 0.5, alpha = 0.2, na.rm = TRUE) +
+  geom_text(data = merged_labels,
+            aes(x = label_x, y = Group, label = label),
+            size = 7 / 2.835,
+            hjust = 0) +
+  labs(x = "Closeness centrality", y = "") +
+  scale_color_manual(values = color_manual) +
+  facet_grid(typ ~ ., scales = "free", space = "fixed") +
+  coord_flip() +
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 7, color = "black", hjust = 0.5),
+    plot.subtitle = element_text(size = 6, color = "black", hjust = 0.5),
+    axis.title = element_text(size = 7, color = "black"),
+    axis.text = element_text(size = 6, color = "black"),
+    legend.title = element_text(size = 7, color = "black"),
+    legend.text = element_text(size = 6, color = "black"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    legend.position = "none",
+    strip.text = element_text(size = 7, color = "black"),
+    plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "cm")
+  )
+
+final_plot <- p_between + p_close
+
+width <- 16
+height <- 16
+name <- paste0(dir_name, "/All_betweenness_closeness")
+ggsave(paste0(name, ".png"), final_plot, width = width, height = height, dpi = 600, units = "cm")
+ggsave(paste0(name, ".pdf"), final_plot, width = width, height = height, units = "cm")
+ggsave(paste0(name, ".tiff"), final_plot, width = width, height = height, dpi = 600, units = "cm", compression = "lzw")

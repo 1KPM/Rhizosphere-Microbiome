@@ -1,0 +1,139 @@
+# ******************************************************************************
+# @File: 02-degree.R
+# @Author: Mingxing Wang
+# @Email: xing592798030@163.com
+# @Date: 2026-03-03 09:34:31
+# @License: Copyright (C) 2026 Mingxing Wang. All rights reserved.
+# @Reference: Mingxing Wang
+# @Description: 
+# ******************************************************************************
+
+
+### Settings -------------------------------------------------------------------
+# Set Work Path
+pwd <- dirname(rstudioapi::getSourceEditorContext()$path)
+setwd(pwd)
+
+# Set seed
+set.seed(1994)
+
+# Create directory
+dir_name <- "02-degree"
+if (!file.exists(dir_name)) {dir.create(dir_name, recursive = T)}
+
+# Import package
+library(tidyverse)
+library(RColorBrewer)
+
+
+### Define variable -----------------------------------------------------------
+p_adjust_method <- "fdr"
+
+type <- c("all", "inter", "intra")
+color_manual <- colorRampPalette(brewer.pal(3, 'Accent'))(3)
+# ------------------------------------------------------------------------------
+
+
+### Get results ----------------------------------------------------------------
+for (typ in type) {
+    first_prefix <- ifelse(typ == "all", "01", ifelse(typ == "inter", "02", "03"))
+    second_prefix <- ifelse(typ == "all", "02", "01")
+    
+    dir_path <- paste0("../", first_prefix, "-", typ, "_network/", second_prefix, "-get_", typ, "_network_property")
+    
+    tmp_df <- read.csv(paste0(dir_path, '/', typ, '_network_hub_info.csv'),row.names = 1)
+    
+    
+    tmp_df <- tmp_df %>%
+      mutate(Clade = case_when(
+        substr(.[[1]], 1, 1) == "b" ~ "Bacteria",
+        substr(.[[1]], 1, 1) == "f" ~ "Fungi",
+        substr(.[[1]], 1, 1) == "p" ~ "Protist",
+        TRUE ~ NA_character_
+      ))
+    
+    
+    tmp_df <- tmp_df %>%
+        mutate(Clade = case_when(Clade == "Protist" ~ "Protists", TRUE ~ Clade),
+               Clade = factor(Clade, levels = c('Bacteria', 'Fungi', 'Protists')))
+    
+    data_df <- tmp_df[c('Clade', "degree")]
+    names(data_df) <- c('Group', 'Value')
+    
+    summarise_df <- data_df %>%
+        group_by(Group) %>%
+        summarise(
+            n = n(),
+            mean = mean(Value, na.rm = TRUE),
+            min = min(Value, na.rm = TRUE),
+            max = max(Value, na.rm = TRUE),
+            sd = sd(Value, na.rm = TRUE),
+            se = sd / sqrt(n),
+            ci = qt(0.975, df = n - 1) * se
+        ) %>%
+        mutate(allmax = max(max))
+    # Non-parametric test (Kruskal-Wallis rank-sum test with Dunn's post hoc test)
+    kruskal_test <- kruskal.test(Value ~ Group, data = data_df)
+    sig_value <- kruskal_test$p.value
+    dunn_test <- rstatix::dunn_test(data_df, Value ~ Group, p.adjust.method = p_adjust_method)
+    pvalue_df <- data.frame(KruskalWallis = sig_value, dunn_test[c("group1", "group2", "p.adj")])
+    pvalue_df$label <- ifelse(pvalue_df$p.adj < 0.001, "***",
+                            ifelse(pvalue_df$p.adj < 0.01, "**", 
+                                    ifelse(pvalue_df$p.adj < 0.05, "*", "n.s.")))
+    n <- nrow(summarise_df)
+    pvalue_matrix <- matrix(1, ncol = n, nrow = n)
+    k <- 0
+    for(i in 1:(n - 1)) { 
+        for(j in (i + 1):n) { 
+            k <- k + 1
+            pvalue_matrix[i, j] <- pvalue_df$p.adj[k]
+            pvalue_matrix[j, i] <- pvalue_df$p.adj[k]
+        }
+    }
+    letter_df <- agricolae::orderPvalue(summarise_df$Group, summarise_df$mean, 0.05, pvalue_matrix, console = TRUE)
+    letter_df <- letter_df[levels(data_df$Group),]
+    summarise_df$label <- letter_df$groups
+    
+    p <- ggplot(data_df, aes(x = Group, y = Value)) + 
+        geom_point(aes(color = Group), position = position_jitterdodge(dodge.width = 0.6), 
+                   alpha = 0.4, size = 3, stroke = 0) +
+        geom_boxplot(width = 0.3, alpha = 0.2, na.rm = TRUE) +   
+        geom_violin(width = 0.5, alpha = 0.2, na.rm = TRUE) +  
+        geom_text(
+            data = summarise_df,
+            mapping = aes(x = Group, y = max + allmax * 0.1, label = label),
+            position = position_dodge(0.9),
+            size = 7 / 2.835
+        ) +
+        labs(
+            x = '',
+            y = 'Degree centrality',
+        ) + 
+        theme_bw() + 
+        coord_flip() +
+        scale_color_manual(values = color_manual) + 
+        theme(plot.title = element_text(size = 7, color = 'black', hjust = 0.5), 
+              plot.subtitle = element_text(size = 6, color = 'black', hjust = 0.5), 
+              axis.title = element_text(size = 7, color = 'black'), 
+              axis.text = element_text(size = 6, color = 'black'), 
+              legend.title = element_text(size = 7, color = 'black'), 
+              legend.text = element_text(size = 6,  color = 'black'), 
+              panel.grid.major = element_blank(), 
+              panel.grid.minor = element_blank(), 
+              panel.background = element_blank(), 
+              legend.position = 'none',
+              plot.margin = unit(c(0, 0, 0, 0), "cm")
+              )
+    
+    width <- 5.8
+    height <- 3.5
+    name <- paste0(dir_name, "/", typ, "_degree")
+    ggsave(paste0(name, ".png"), p, width = width, height = height, dpi = 600, units = "cm")
+    ggsave(paste0(name, ".pdf"), p, width = width, height = height, units = "cm")
+    ggsave(paste0(name, ".tiff"), p, width = width, height = height, dpi = 600, units = "cm", compression = "lzw")
+    
+    write.csv(data_df, paste0(name, "_data.csv"), row.names = F)
+    write.csv(summarise_df, paste0(name, "_summarise.csv"), row.names = F)
+    write.csv(pvalue_df, paste0(name, "_pvalue.csv"), row.names = F)
+}
+# ------------------------------------------------------------------------------

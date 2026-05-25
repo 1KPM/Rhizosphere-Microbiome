@@ -1,0 +1,210 @@
+pwd <- dirname(rstudioapi::getSourceEditorContext()$path)
+setwd(pwd)
+
+
+library(reshape2)
+library(ggplot2)
+library(gridExtra)
+library(ComplexHeatmap)
+library(purrr)
+library(stringr)
+library(tibble)
+library(dplyr)
+library(circlize)
+library(tidyr)
+
+
+##Enrich Data Prepare
+source("enrichment_functions.R")
+categories <- c("Bacteria" = "bac", "Fungi" = "fun", "Protists" = "pro")
+
+taxonomy <- read.csv("./data/All_core_ASV_taxonomy.csv")
+abundance <- read.csv("./data/All_core_feature_table_qa.csv", row.names = 1,check.names = F)
+
+for (category_name in names(categories)) {
+  category_abbr <- categories[category_name]
+  
+  if (category_name == "Bacteria") {
+    pattern <- "^b"
+    kingdom_name <- "Bacteria"
+  } else if (category_name == "Fungi") {
+    pattern <- "^f"
+    kingdom_name <- "Fungi"
+  } else if (category_name == "Protists") {
+    pattern <- "^p"
+    kingdom_name <- "Protists"
+  }
+  
+  data_diff <- read.csv(paste0("./stats/", category_abbr, "_qa_log_metastat_res_diff_ASV_core0.2.csv"), row.names = 1)  %>% 
+    mutate(Significant = (pvalue < 0.05 & qvalue < 0.2)) %>% 
+    filter(Significant)
+  
+  data_diff <- data_diff %>% mutate(ASVID = str_extract(Taxa, "^[^|]+"))
+  
+  subset_abundance <- abundance[grepl(pattern, row.names(abundance)), ]
+  subset_taxonomy <- taxonomy %>% filter(Clade == kingdom_name)
+  
+  ASV_taxa <- subset_taxonomy %>% 
+    select(ASVID, Order) %>% 
+    distinct(ASVID, .keep_all = TRUE)
+  
+  comparison_groups <- unique(data_diff$Comparison)
+  
+  enrich_results <- list()
+  
+  data_Fabales <- data_diff %>% 
+    left_join(ASV_taxa, by = "ASVID") %>% 
+    mutate(Order = replace_na(Order, "Others")) %>%
+    rename(FeatureID = ASVID, Order = Order) %>%
+    filter(grepl("Fabales", Comparison)) %>%
+    filter(Order != "Unassign" & Order != "")
+  
+  
+  colnames(ASV_taxa) <- c("FeatureID","Order")
+  
+  for (group in comparison_groups) {
+    enrich_data <- data_Fabales %>% 
+      filter(Comparison == group & Group == "Fabales")
+    enrich_res <- perform_taxa_enrichment(
+      tax_level = "Order",
+      diff_data = enrich_data,
+      tax_data = ASV_taxa,
+      min_counts = 1
+    )
+    if (nrow(enrich_res) > 0) {
+      enrich_res$GroupComparison <- group
+      enrich_res$Direction <- "Enriched"
+      enrich_results[[paste0(group, "_Enriched")]] <- enrich_res
+    }
+    
+    deplete_data <- data_Fabales %>% 
+      filter(Comparison == group & Group != "Fabales")
+    deplete_res <- perform_taxa_enrichment(
+      tax_level = "Order",
+      diff_data = deplete_data,
+      tax_data = ASV_taxa,
+      min_counts = 1
+    )
+    if (nrow(deplete_res) > 0) {
+      deplete_res$GroupComparison <- group
+      deplete_res$Direction <- "Depleted"
+      enrich_results[[paste0(group, "_Depleted")]] <- deplete_res
+    }
+  }
+  final_result <- do.call(rbind, enrich_results)
+  write.csv(final_result,paste0("./stats/", category_abbr, "_qa_log_tree_metastat_res_diff_ASV_enrich(core0.2p0.05q0.2).csv"))
+}
+
+
+
+##Enrich Plot
+microbes <- c("bac", "fun", "pro")
+
+target_columns <-c("Rosales - Fabales","Lamiales - Fabales","Malpighiales - Fabales","Sapindales - Fabales",
+                   "Fabales - Gentianales","Fabales - Asparagales","Malvales - Fabales","Myrtales - Fabales",
+                   "Arecales - Fabales","Others - Fabales")
+
+new_columns <- c("Fabales vs Rosales", "Fabales vs Lamiales", "Fabales vs Malpighiales", "Fabales vs Sapindales", 
+                 "Fabales vs Gentianales", "Fabales vs Asparagales", "Fabales vs Malvales", "Fabales vs Myrtales", 
+                 "Fabales vs Arecales", "Fabales vs Others")
+
+microbe_colors <- setNames(
+  c("#8DD3C7","#BEBADA","#FFFFB3"),
+  microbes
+)
+
+combined_data <- map_dfr(microbes, function(microbe) {
+  read.csv(paste0("./stats/", microbe, "_qa_log_tree_metastat_res_diff_ASV_enrich(core0.2p0.05q0.2).csv")) %>%
+    filter(FDR < 0.05) %>%
+    filter(str_detect(GroupComparison, "Fabales")) %>%
+    distinct(Taxon, GroupComparison, .keep_all = TRUE) %>%
+    mutate(EnrichmentFactor = if_else(Direction == "Depleted", 
+                                      -EnrichmentFactor, 
+                                      EnrichmentFactor)) %>%
+    mutate(Kingdom = microbe)
+}) 
+
+#Acidobacteriae Subgroup_2 保留，这是个高丰度的目
+combined_data <- combined_data %>% filter(!Taxon %in% c("AD3", "0319-6G20", "JG36-TzT-191", "Unassign", "MB-A2-108"))
+
+full_matrix <- combined_data %>%
+  pivot_wider(
+    id_cols = c(Taxon, Kingdom),
+    names_from = GroupComparison,
+    values_from = EnrichmentFactor,
+    values_fill = 0
+  ) %>%
+  arrange(factor(Kingdom, levels = microbes)) %>% 
+  column_to_rownames("Taxon") %>%
+  select(-Kingdom) %>%
+  as.matrix()
+
+new_matrix <- matrix(0, 
+                     nrow = nrow(full_matrix),
+                     ncol = length(target_columns),
+                     dimnames = list(rownames(full_matrix), target_columns))
+
+common_cols <- intersect(colnames(full_matrix), target_columns)
+for (col in common_cols) {
+  new_matrix[, col] <- full_matrix[, col]
+}
+
+full_matrix <- as.matrix(new_matrix)
+colnames(full_matrix) <- new_columns
+
+row_annotation <- combined_data %>%
+  distinct(Taxon, Kingdom) %>%
+  arrange(factor(Kingdom, levels = microbes)) %>%
+  column_to_rownames("Taxon") %>%
+  select(Kingdom)
+
+row_ha <- rowAnnotation(
+  df = row_annotation["Kingdom"],
+  col = list(Kingdom = microbe_colors),
+  show_annotation_name = FALSE,
+  show_legend = TRUE,
+  annotation_legend_param = list(
+    title_gp = gpar(fontsize = 6),
+    labels_gp = gpar(fontsize = 6),
+    grid_height = unit(3, "mm"),
+    grid_width = unit(3, "mm"),
+    ncol = 1
+  )
+)
+
+final_plot <- Heatmap(
+  matrix = full_matrix,
+  col = colorRamp2(c(min(full_matrix), 0, max(full_matrix)), c("#5BA2D8", "white", "#EC499A")),
+  
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  show_row_names = TRUE,
+  show_column_names = TRUE,
+  row_names_gp = gpar(fontsize = 6),
+  column_names_gp = gpar(fontsize = 6),
+  column_names_rot = 45,
+  #  column_title = " ",
+  column_title_side = "top",  
+  column_title_gp = gpar(fontsize = 6),
+  rect_gp = gpar(col = "black", lwd = 0.2),
+  
+  left_annotation = row_ha,
+  row_title = NULL,
+  row_split = factor(rep(seq_along(rle(row_annotation$Kingdom)$lengths), rle(row_annotation$Kingdom)$lengths)),
+  row_gap = unit(2, "mm"),
+  width = ncol(full_matrix) * unit(5.5, "mm"),
+  #  height = nrow(full_matrix) * unit(4, "mm"),
+  
+  heatmap_legend_param = list(
+    title = "EnrichmentFactor",
+    title_gp = gpar(fontsize = 6),
+    labels_gp = gpar(fontsize = 6),
+    gap = unit(5, "cm") 
+  )
+)
+
+final_plot_grob <- grid.grabExpr(draw(final_plot))
+
+ggsave("./plots/diff_asv_enrich_taxa.pdf", final_plot_grob, width = 10, height = 24, dpi = 300,units = "cm")
+ggsave("./plots/diff_asv_enrich_taxa.png", final_plot_grob, width = 10, height = 24, dpi = 300,units = "cm")
+
