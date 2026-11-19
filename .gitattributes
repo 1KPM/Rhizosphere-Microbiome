@@ -2,3 +2,4 @@
 .gitattributes !text -filter -merge -diff
 .gitignore !text -filter -merge -diff
 .lfsconfig !text -filter -merge -diff
+02_Lineage_Specific_Analysis_Code_Data/README.md -filter diff merge text
